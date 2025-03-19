@@ -172,3 +172,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Input/output files
+fma_small/
+output/
+
+# ARSS for testing
+arss-0.2.3-*/
