@@ -1,0 +1,8 @@
+librosa==0.10.2
+numpy==1.26.4
+tqdm
+matplotlib
+datasets==3.4.1
+transformers==4.49.0
+diffusers==0.32.2
+accelerate==0.5.2
