@@ -180,3 +180,5 @@ output/
 # ARSS for testing
 arss-0.2.3-*/
 *.zip
+
+.vscode
