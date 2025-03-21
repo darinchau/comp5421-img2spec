@@ -1,9 +1,8 @@
+import os
 import librosa
 import numpy as np
-import os
 from tqdm import tqdm
 import numpy as np
-import librosa
 import librosa.display
 import soundfile as sf
 import datasets
@@ -108,7 +107,7 @@ def mel_to_audio(spec, sr: float, n_iter: int = 32):
     _check_spec(spec)
     mel = librosa.db_to_amplitude(spec * 80.0)
 
-    mel_basis = librosa.filters.mel(sr, n_fft=2048, n_mels=128)
+    mel_basis = librosa.filters.mel(sr=sr, n_fft=2048, n_mels=128)
     inv_mel_basis = np.linalg.pinv(mel_basis)
     stft_magnitude = np.dot(inv_mel_basis, mel)
 
@@ -128,16 +127,17 @@ def convert_ds_to_hf_dataset(ds: dict):
 def prepare_dataset(files_dir: str | list[str], save_dir: str, count: int = -1):
     should_push = os.getenv("HF_TOKEN") is not None
     dataset = dict(make_dataset(files_dir, count=count))
+    save_spec(dataset, save_dir)
+
     if not should_push:
         print("HF_TOKEN is not set. Dataset will not be pushed to the hub.")
-        save_spec(dataset, save_dir)
         # bounce if hugging face not logged in
     else:
         hfds = convert_ds_to_hf_dataset(dataset)
-        hfds.push_to_hub("mel-spectrogram-dataset-test-2", private=True)
+        hfds.push_to_hub("comp5421-mel-spectrogram", private=True)
 
 if __name__ == "__main__":
     prepare_dataset([
         "D:/audio-dataset-v3/audio",
         "./fma_small"
-    ], "./output", count=1000)
+    ], "./output", count=50000)
