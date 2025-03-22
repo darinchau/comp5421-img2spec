@@ -9,12 +9,25 @@ import datasets
 import huggingface_hub
 import dotenv
 from typing import Iterator
+from dataclasses import dataclass
 
 dotenv.load_dotenv()
 # Login to Hugging Face. Comment this line if you don't want to push to the hub
 huggingface_hub.login(os.getenv("HF_TOKEN"))
 
 TARGET_SR = 44100
+
+@dataclass(frozen = True)
+class COMP5421Config():
+    batch_size: int = 4
+    num_epochs: int = 10
+    learning_rate: float = 1e-4
+    img_dims: tuple[int, int] = (128, 432)
+    dataset_src: str = "darinchau/comp5421-mel-spectrogram"
+    training_name: str = "comp5421-project"
+    val_size: float = 0.1
+    val_step: int = 1024 # Validate every n steps
+    val_samples: float = 100 # Validate over n samples instead of the whole val set
 
 def audio2mel(filepath: str):
     x, sr = librosa.load(filepath, sr=TARGET_SR, mono=True)
