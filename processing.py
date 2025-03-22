@@ -8,6 +8,7 @@ import soundfile as sf
 import datasets
 import huggingface_hub
 import dotenv
+from typing import Iterator
 
 dotenv.load_dotenv()
 # Login to Hugging Face. Comment this line if you don't want to push to the hub
@@ -68,44 +69,62 @@ def make_dataset(files_dir: str | list[str], *, count: int = -1):
             try:
                 mels = audio2mels(filepath)
                 for i, mel in enumerate(mels):
-                    if mel.shape == (128, 432):
-                        yield f"{file_dir}-{filename}-{i}", mel
-                        loaded_count += 1
-                        if count > 0 and loaded_count >= count:
-                            break
-                    else:
-                        print("Skipping shape {}".format(mel.shape))
+                    try:
+                        _check_spec(mel)
+                        yield {
+                            "filename": f"{file_dir}-{filename}-{i}",
+                            "mel": mel
+                        }
+                    except Exception as e:
+                        tqdm.write(f"Error in {filename}: {e}")
             except Exception as e:
-                print(e)
+                tqdm.write(str(e))
                 pass
 
-def save_spec(dataset: dict, save_dir: str):
+def convert_ds_stream_to_dict(ds_stream):
+    ds_dict = {}
+    for ds in ds_stream:
+        _check_spec(ds["mel"])
+        ds_dict[ds["filename"]] = ds["mel"]
+    return ds_dict
+
+def save_spec(dataset, save_dir: str):
+    if not isinstance(dataset, dict):
+        convert_ds_stream_to_dict(dataset)
+    for key in dataset:
+        _check_spec(dataset[key])
     os.makedirs(save_dir, exist_ok=True)
-    np.savez_compressed(os.path.join(save_dir, "specs.npz"), **dataset)
+    path = os.path.join(save_dir, "specs.npz")
+    np.savez_compressed(path, **dataset)
+    return path
 
 def _check_spec(spec):
     # To keep my sanity
+    assert isinstance(spec, np.ndarray), f"Data is not a numpy array, but {type(spec)}"
     assert spec.shape == (128, 432), f"Shape is {spec.shape}, expected (128, 432)"
     assert spec.dtype == np.float32, f"Data type is {spec.dtype}, expected np.float32"
     assert np.isfinite(spec).all(), "Data contains non-finite values"
     assert np.abs(spec).max() <= 80, "Data contains values greater than 80 dB"
     assert np.abs(spec).max() > 1, "Empty data, or you probably forget to unnormalize it"
 
-def load_spec(spec_file: str):
+def load_ds(spec_file: str):
     ds = np.load(spec_file)
-    dsdict = {}
     for key in ds:
+        mel = np.array(ds[key])
+        mel = mel.astype(np.float32)
         try:
-            _check_spec(ds[key])
+            _check_spec(mel)
         except Exception as e:
             print(f"Error in {key}: {e}")
             continue
-        dsdict[key] = ds[key] / 80.0 # Normalize to [-1, 1]
-    return dsdict
+        yield {
+            "filename": key,
+            "mel": mel
+        }
 
 def mel_to_audio(spec, sr: float, n_iter: int = 32):
     _check_spec(spec)
-    mel = librosa.db_to_amplitude(spec * 80.0)
+    mel = librosa.db_to_amplitude(spec)
 
     mel_basis = librosa.filters.mel(sr=sr, n_fft=2048, n_mels=128)
     inv_mel_basis = np.linalg.pinv(mel_basis)
@@ -116,28 +135,56 @@ def mel_to_audio(spec, sr: float, n_iter: int = 32):
 
     return audio
 
-def convert_ds_to_hf_dataset(ds: dict):
-    hfds_dict = {"filename": [], "mel": []}
-    for key in ds:
-        hfds_dict["filename"].append(key)
-        hfds_dict["mel"].append(ds[key])
-    hf_ds = datasets.Dataset.from_dict(hfds_dict)
+def convert_ds_to_hf_dataset(ds, batch_size=100):
+    # Define features
+    features = datasets.Features({
+        "filename": datasets.Value("string"),
+        "mel": datasets.Array2D(shape=(128, 432), dtype="float32")
+    })
+
+    if isinstance(ds, dict):
+        def generator():
+            for key in ds.items():
+                yield {
+                    "filename": key,
+                    "mel": ds[key]
+                }
+        ds_ = generator()
+    else:
+        ds_ = ds
+
+    # Initialize empty dataset
+    hf_ds = datasets.Dataset.from_dict({"filename": [], "mel": []}, features=features)
+
+    while True:
+        batch_dict = {
+            "filename": [],
+            "mel": []
+        }
+        _stop = False
+        for i in range(batch_size):
+            try:
+                data = next(ds_)
+            except StopIteration:
+                _stop = True
+                break
+            batch_dict["filename"].append(data["filename"])
+            batch_dict["mel"].append(data["mel"])
+
+        # Create a small dataset from the batch and concatenate it
+        batch_ds = datasets.Dataset.from_dict(batch_dict, features=features)
+        hf_ds = datasets.concatenate_datasets([hf_ds, batch_ds])
+        if _stop:
+            break
+
     return hf_ds
 
 def prepare_dataset(files_dir: str | list[str], save_dir: str, count: int = -1):
-    should_push = os.getenv("HF_TOKEN") is not None
-    dataset = dict(make_dataset(files_dir, count=count))
-    save_spec(dataset, save_dir)
-
-    if not should_push:
-        print("HF_TOKEN is not set. Dataset will not be pushed to the hub.")
-        # bounce if hugging face not logged in
-    else:
-        hfds = convert_ds_to_hf_dataset(dataset)
-        hfds.push_to_hub("comp5421-mel-spectrogram", private=True)
+    hfds = convert_ds_to_hf_dataset(make_dataset(files_dir, count=count))
+    hfds.push_to_hub("comp5421-mel-spectrogram", private=True)
 
 if __name__ == "__main__":
     prepare_dataset([
         "D:/audio-dataset-v3/audio",
         "./fma_small"
-    ], "./output", count=50000)
+    ], "./output", count=200000)
