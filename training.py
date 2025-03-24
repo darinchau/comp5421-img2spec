@@ -19,7 +19,7 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class COMP5421Config():
-    batch_size: int = 4
+    batch_size: int = 40
     num_epochs: int = 10
     learning_rate: float = 1e-4
     img_dims: tuple[int, int] = (128, 432)
@@ -28,7 +28,7 @@ class COMP5421Config():
     val_size: float = 0.1
     val_step: int = 512  # Validate every n steps
     val_samples: float = 100  # Validate over n samples instead of the whole val set
-    save_step: int = 2048
+    save_step: int = 512
 
 
 huggingface_hub.login(os.getenv("HF_TOKEN"))
@@ -71,6 +71,7 @@ def main():
     def collate_fn(batch):
         mels = [torch.tensor(item['mel']).unsqueeze(0) for item in batch]  # Adding channel dimension
         mels = torch.stack(mels).to(device)  # Shape will be [batch_size, 1, 128, 432]
+        mels = mels/80. # Normalize to [-1, 1]
         return mels
 
     train_test = dataset['train'].train_test_split(test_size=config.val_size)
