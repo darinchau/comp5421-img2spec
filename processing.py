@@ -60,32 +60,34 @@ def make_dataset(files_dir: str | list[str], *, count: int = -1):
         files_dir = [files_dir]
 
     # This ensures that we load the same number of files from each directory
-    count = -1 if count < 0 else count // len(files_dir) + 1
+    files: list[tuple[str, str]] = []
 
     for file_dir in files_dir:
-        files = [os.path.abspath(f) for f in find_files(file_dir) if f.lower().endswith('.mp3') or f.lower().endswith('.wav')]
-        loaded_count = 0
-        total_loaded_count = len(files) if count == -1 else None
-        for filepath in tqdm(files, desc="Processing files...", total=total_loaded_count):
-            if count > 0 and loaded_count >= count:
-                break
-            filename = os.path.basename(filepath)
+        files_ = [(file_dir, os.path.abspath(f)) for f in find_files(file_dir) if f.lower().endswith('.mp3') or f.lower().endswith('.wav')]
+        files.extend(files_)
 
-            # Call the function on the MP3 file
-            try:
-                mels = audio2mels(filepath)
-                for i, mel in enumerate(mels):
-                    try:
-                        _check_spec(mel)
-                        yield {
-                            "filename": f"{file_dir}-{filename}-{i}",
-                            "mel": mel
-                        }
-                    except Exception as e:
-                        tqdm.write(f"Error in {filename}: {e}")
-            except Exception as e:
-                tqdm.write(str(e))
-                pass
+    loaded_count = 0
+    for file_dir, filepath in tqdm(files, desc="Processing files...", total=len(files) if count == -1 else count):
+        if count > 0 and loaded_count >= count:
+            break
+        filename = os.path.basename(filepath)
+
+        # Call the function on the MP3 file
+        try:
+            mels = audio2mels(filepath)
+            for i, mel in enumerate(mels):
+                try:
+                    _check_spec(mel)
+                    yield {
+                        "filename": f"{file_dir}-{filename}-{i}",
+                        "mel": mel
+                    }
+                    loaded_count += 1
+                except Exception as e:
+                    tqdm.write(f"Error in {filename}: {e}")
+        except Exception as e:
+            tqdm.write(str(e))
+            pass
 
 def convert_ds_stream_to_dict(ds_stream):
     ds_dict = {}
