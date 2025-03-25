@@ -1,7 +1,7 @@
 import os
 import librosa
 import numpy as np
-from tqdm import tqdm
+from tqdm import tqdm, trange
 import numpy as np
 import librosa.display
 import soundfile as sf
@@ -9,25 +9,18 @@ import datasets
 import huggingface_hub
 import dotenv
 from typing import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+import gc
+import time
+import torch
+from diffusers import DDPMScheduler, UNet2DModel, DDIMScheduler, DiffusionPipeline #type: ignore
+
 
 dotenv.load_dotenv()
 # Login to Hugging Face. Comment this line if you don't want to push to the hub
 huggingface_hub.login(os.getenv("HF_TOKEN"))
 
 TARGET_SR = 44100
-
-@dataclass(frozen = True)
-class COMP5421Config():
-    batch_size: int = 4
-    num_epochs: int = 10
-    learning_rate: float = 1e-4
-    img_dims: tuple[int, int] = (128, 432)
-    dataset_src: str = "darinchau/comp5421-mel-spectrogram"
-    training_name: str = "comp5421-project"
-    val_size: float = 0.1
-    val_step: int = 1024 # Validate every n steps
-    val_samples: float = 100 # Validate over n samples instead of the whole val set
 
 def audio2mel(filepath: str):
     x, sr = librosa.load(filepath, sr=TARGET_SR, mono=True)
@@ -195,6 +188,64 @@ def convert_ds_to_hf_dataset(ds, batch_size=100):
 def prepare_dataset(files_dir: str | list[str], save_dir: str, count: int = -1):
     hfds = convert_ds_to_hf_dataset(make_dataset(files_dir, count=count))
     hfds.push_to_hub("comp5421-mel-spectrogram", private=True)
+
+def inference(
+    model: UNet2DModel | None = None,
+    model_repo: str | None = None,
+    seed: int | None = None,
+    sample_steps: int = 100,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    sample_count: int = 1,
+    verbose: bool = False
+):
+    """
+    Perform inference using the DDIM model
+
+    Args:
+        model (UNet2DModel): The model to use for inference
+        model_repo (str): The model repository to load the model from
+        seed (int): The seed to use for the random number generator
+        sample_steps (int): The number of steps to sample
+        device (torch.device): The device to use for inference
+        sample_count (int): The number of samples to generate
+        verbose (bool): Whether to print verbose output
+    """
+    if model is None and model_repo is None:
+        raise ValueError("Either model or model_repo must be provided")
+
+    if model is None and model_repo is not None:
+        model = UNet2DModel.from_pretrained(model_repo).to(device) #type: ignore
+
+    steps = sample_steps
+    generator = torch.Generator(device=device)
+    if seed is not None:
+        generator.manual_seed(seed)
+
+    sampler = DDIMScheduler(
+        num_train_timesteps=1000
+    )
+
+    latents = torch.randn((sample_count, 1, 128, 432), device=device, generator=generator, dtype=torch.float32)
+    latents = latents * sampler.init_noise_sigma
+    sampler.set_timesteps(steps)
+    timesteps = sampler.timesteps.to(device)
+
+    extra_step_kwargs = {
+        'eta': 0.0,
+        'generator': generator
+    }
+
+    for i, t in enumerate(tqdm(timesteps, desc="DDIM Sampling:", disable=not verbose)):
+        model_input = latents
+
+        timestep_tensor = torch.tensor([t], dtype=torch.long, device=device)
+        timestep_tensor = timestep_tensor.expand(latents.shape[0])
+        with torch.no_grad():
+            noise_pred = model(model_input, timestep_tensor)[0] #type: ignore
+
+        latents = sampler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample #type: ignore
+
+    return latents.detach().cpu().numpy() * 80.
 
 if __name__ == "__main__":
     prepare_dataset([
