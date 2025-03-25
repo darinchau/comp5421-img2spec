@@ -19,16 +19,17 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class COMP5421Config():
-    batch_size: int = 40
+    batch_size: int = 32
     num_epochs: int = 10
     learning_rate: float = 1e-4
     img_dims: tuple[int, int] = (128, 432)
     dataset_src: str = "darinchau/comp5421-mel-spectrogram"
     training_name: str = "comp5421-project"
     val_size: float = 0.1
-    val_step: int = 512  # Validate every n steps
-    val_samples: float = 100  # Validate over n samples instead of the whole val set
+    val_step: int = 256  # Validate every n steps
+    val_samples: float = 256  # Validate over n samples instead of the whole val set
     save_step: int = 512
+    load_model_from: str | None = "darinchau/comp5421-project-sage-lake-20-comp5421-mel-spectrogram-step-2560"
 
 
 huggingface_hub.login(os.getenv("HF_TOKEN"))
@@ -42,7 +43,7 @@ def validate(config, model, loader, noise_scheduler, loss_func):
     for val_batch in tqdm(loader, desc="Validating...", total=config.val_step):
         val_count += 1
         noise = torch.randn_like(val_batch)
-        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (config.batch_size,), device=device, dtype=torch.int64)
+        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (val_batch.size(0),), device=device, dtype=torch.int64)
         noisy_batch = noise_scheduler.add_noise(val_batch, noise, timesteps)
         noise_pred = model(noisy_batch, timesteps)[0]
         loss = loss_func(noise_pred, noise)
@@ -62,7 +63,17 @@ def main():
         block_out_channels=(32, 64, 64),
         down_block_types=("DownBlock2D", "AttnDownBlock2D", "DownBlock2D"),
         up_block_types=("UpBlock2D", "AttnUpBlock2D", "UpBlock2D")
-    ).to(device)
+    )
+
+    if config.load_model_from is not None:
+        model = UNet2DModel.from_pretrained(config.load_model_from)
+        step_count = int(config.load_model_from.split("-")[-1])
+        print(f"Resuming training from checkpoint: {config.load_model_from} (Step: {step_count})")
+    else:
+        step_count = 0
+        print("Starting training anew...")
+
+    model = model.to(device)
 
     # Load the dataset
     # If you need this dataset lmk - Darin
@@ -92,7 +103,6 @@ def main():
     )
 
     # Training Loop
-    step_count = 0
     for epoch in range(config.num_epochs):
         model.train()
         epoch_loss = 0.0
@@ -102,7 +112,7 @@ def main():
 
             # Add noise
             noise = torch.randn_like(batch)
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (config.batch_size,), device=device, dtype=torch.int64)
+            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (batch.size(0),), device=device, dtype=torch.int64)
             noisy_batch = noise_scheduler.add_noise(batch, noise, timesteps)
 
             # Forward pass
@@ -115,11 +125,14 @@ def main():
 
             if step_count > 0 and step_count % config.val_step == 0:
                 with torch.no_grad():
-                    val_loss = validate(model, val_loader, noise_scheduler, loss_func)
-                wandb.log({"val_batch_loss": val_loss.item()}, step=step_count)
+                    try:
+                        val_loss = validate(config, model, val_loader, noise_scheduler, loss_func)
+                        wandb.log({"val_batch_loss": val_loss.item()}, step=step_count)
+                    except Exception as e:
+                        tqdm.write(f"Failed to perform validation... {e}")
 
             if step_count > 0 and step_count % config.save_step == 0:
-                model.push_to_hub(f"{config.training_name}-{config.dataset_src.split('/')[1]}-step-{step_count}")
+                model.push_to_hub(f"{config.training_name}-{wandb.run.name}-{config.dataset_src.split('/')[1]}-step-{step_count}")
 
             epoch_loss += loss.item()
             wandb.log({"batch_loss": loss.item()}, step=step_count)
@@ -128,10 +141,9 @@ def main():
         print(f'Epoch {epoch + 1} completed, Average Loss: {average_epoch_loss}')
         wandb.log({"epoch_loss": average_epoch_loss}, step=step_count)
 
+    model.push_to_hub(f"{config.training_name}-{wandb.run.name}-{config.dataset_src.split('/')[1]}")
     wandb.finish()
     print("Training completed.")
-
-    model.push_to_hub(f"{config.training_name}-{config.dataset_src.split('/')[1]}")
 
 
 if __name__ == "__main__":
