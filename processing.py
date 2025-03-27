@@ -15,6 +15,7 @@ import time
 import torch
 from diffusers import DDPMScheduler, UNet2DModel, DDIMScheduler, DiffusionPipeline #type: ignore
 
+SPECTROGRAM_SHAPE = (128, 216)
 
 dotenv.load_dotenv()
 # Login to Hugging Face. Comment this line if you don't want to push to the hub
@@ -24,23 +25,25 @@ TARGET_SR = 44100
 
 def audio2mel(filepath: str):
     x, sr = librosa.load(filepath, sr=TARGET_SR, mono=True)
-    start, end = 0, 432*512-1
+    nmel, nframe = SPECTROGRAM_SHAPE
+    start, end = 0, nframe * 512 - 1
 
     stft = np.abs(librosa.stft(x[start:end], n_fft=2048, hop_length=512))
-    mel = librosa.feature.melspectrogram(sr=sr, S=stft**2, n_mels=128)
+    mel = librosa.feature.melspectrogram(sr=sr, S=stft**2, n_mels=nmel)
     log_mel = librosa.amplitude_to_db(mel)
 
     return log_mel
 
 def audio2mels(filepath: str, start: int = 0):
     x, sr = librosa.load(filepath, sr=TARGET_SR, mono=True)
+    nmel, nframe = SPECTROGRAM_SHAPE
     log_mels = []
-    for start in range(0, len(x), 432 * 512 - 1):
-        end = start + 432 * 512 - 1
+    for start in range(0, len(x), nframe * 512 - 1):
+        end = start + nframe * 512 - 1
         if end >= len(x):
             break
         stft = np.abs(librosa.stft(x[start:end], n_fft=2048, hop_length=512))
-        mel = librosa.feature.melspectrogram(sr=sr, S=stft**2, n_mels=128)
+        mel = librosa.feature.melspectrogram(sr=sr, S=stft**2, n_mels=nmel)
         log_mel = librosa.amplitude_to_db(mel)
         log_mels.append(log_mel)
 
@@ -109,7 +112,7 @@ def save_spec(dataset, save_dir: str):
 def _check_spec(spec):
     # To keep my sanity
     assert isinstance(spec, np.ndarray), f"Data is not a numpy array, but {type(spec)}"
-    assert spec.shape == (128, 432), f"Shape is {spec.shape}, expected (128, 432)"
+    assert spec.shape == SPECTROGRAM_SHAPE, f"Shape is {spec.shape}, expected {SPECTROGRAM_SHAPE}"
     assert spec.dtype == np.float32, f"Data type is {spec.dtype}, expected np.float32"
     assert np.isfinite(spec).all(), "Data contains non-finite values"
     assert np.abs(spec).max() <= 80, "Data contains values greater than 80 dB"
@@ -133,8 +136,8 @@ def load_ds(spec_file: str):
 def mel_to_audio(spec, sr: float, n_iter: int = 32):
     _check_spec(spec)
     mel = librosa.db_to_amplitude(spec)
-
-    mel_basis = librosa.filters.mel(sr=sr, n_fft=2048, n_mels=128)
+    nmel, nframe = SPECTROGRAM_SHAPE
+    mel_basis = librosa.filters.mel(sr=sr, n_fft=2048, n_mels=nmel)
     inv_mel_basis = np.linalg.pinv(mel_basis)
     stft_magnitude = np.dot(inv_mel_basis, mel)
 
@@ -147,7 +150,7 @@ def convert_ds_to_hf_dataset(ds, batch_size=100):
     # Define features
     features = datasets.Features({
         "filename": datasets.Value("string"),
-        "mel": datasets.Array2D(shape=(128, 432), dtype="float32")
+        "mel": datasets.Array2D(shape=SPECTROGRAM_SHAPE, dtype="float32")
     })
 
     if isinstance(ds, dict):
@@ -187,9 +190,9 @@ def convert_ds_to_hf_dataset(ds, batch_size=100):
 
     return hf_ds
 
-def prepare_dataset(files_dir: str | list[str], save_dir: str, count: int = -1):
+def prepare_dataset(files_dir: str | list[str], hf_hub_dir: str, count: int = -1):
     hfds = convert_ds_to_hf_dataset(make_dataset(files_dir, count=count))
-    hfds.push_to_hub("comp5421-mel-spectrogram", private=True)
+    hfds.push_to_hub(hf_hub_dir, private=True)
 
 def inference(
     model: UNet2DModel | None = None,
@@ -217,8 +220,8 @@ def inference(
 
     Return:
         dict: A dictionary containing the latents
-        dict['latents'] (np.ndarray): The latents generated (shape: (sample_count, 1, 128, 432))
-        dict['intermediates'] (np.ndarray): The intermediate steps generated (shape: (sample_count, sample_steps, 128, 432)). Only returned if return_intermediate_steps is True
+        dict['latents'] (np.ndarray): The latents generated (shape: (sample_count, 1, *SPECTROGRAM_SHAPE))
+        dict['intermediates'] (np.ndarray): The intermediate steps generated (shape: (sample_count, sample_steps, *SPECTROGRAM_SHAPE)). Only returned if return_intermediate_steps is True
     """
     if model is None and model_repo is None:
         raise ValueError("Either model or model_repo must be provided")
@@ -235,8 +238,10 @@ def inference(
         num_train_timesteps=sample_step_start,
     )
 
+    nmel, nframe = SPECTROGRAM_SHAPE
+
     if latents is None:
-        latents = torch.randn((sample_count, 1, 128, 432), device=device, generator=generator, dtype=torch.float32)
+        latents = torch.randn((sample_count, 1, nmel, nframe), device=device, generator=generator, dtype=torch.float32)
         latents = latents * sampler.init_noise_sigma
 
     sampler.set_timesteps(steps)
@@ -274,6 +279,6 @@ def inference(
 
 if __name__ == "__main__":
     prepare_dataset([
-        "D:/audio-dataset-v3/audio",
+        # "D:/audio-dataset-v3/audio",
         "./fma_small"
-    ], "./output", count=200000)
+    ], "comp5421-mel-spectrogram-fma_small-128x216", count=-1)

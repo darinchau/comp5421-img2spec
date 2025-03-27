@@ -19,17 +19,17 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class COMP5421Config():
-    batch_size: int = 32
+    batch_size: int = 4
     num_epochs: int = 10
     learning_rate: float = 1e-4
     img_dims: tuple[int, int] = (128, 432)
     dataset_src: str = "darinchau/comp5421-mel-spectrogram"
     training_name: str = "comp5421-project"
     val_size: float = 0.1
-    val_step: int = 256  # Validate every n steps
+    val_step: int = 1024  # Validate every n steps
     val_samples: float = 256  # Validate over n samples instead of the whole val set
-    save_step: int = 512
-    load_model_from: str | None = "darinchau/comp5421-project-sage-lake-20-comp5421-mel-spectrogram-step-2560"
+    save_step: int = 2048
+    load_model_from: str | None = "darinchau/comp5421-project-devoted-firebrand-28-comp5421-mel-spectrogram-step-4096"
 
 
 huggingface_hub.login(os.getenv("HF_TOKEN"))
