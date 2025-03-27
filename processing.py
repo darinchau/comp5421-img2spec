@@ -196,9 +196,12 @@ def inference(
     model_repo: str | None = None,
     seed: int | None = None,
     sample_steps: int = 100,
+    sample_step_start: int = 1000,
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     sample_count: int = 1,
-    verbose: bool = False
+    verbose: bool = False,
+    latents: torch.Tensor | None = None,
+    return_intermediate_steps: bool = False
 ):
     """
     Perform inference using the DDIM model
@@ -211,6 +214,11 @@ def inference(
         device (torch.device): The device to use for inference
         sample_count (int): The number of samples to generate
         verbose (bool): Whether to print verbose output
+
+    Return:
+        dict: A dictionary containing the latents
+        dict['latents'] (np.ndarray): The latents generated (shape: (sample_count, 1, 128, 432))
+        dict['intermediates'] (np.ndarray): The intermediate steps generated (shape: (sample_count, sample_steps, 128, 432)). Only returned if return_intermediate_steps is True
     """
     if model is None and model_repo is None:
         raise ValueError("Either model or model_repo must be provided")
@@ -224,11 +232,13 @@ def inference(
         generator.manual_seed(seed)
 
     sampler = DDIMScheduler(
-        num_train_timesteps=1000
+        num_train_timesteps=sample_step_start,
     )
 
-    latents = torch.randn((sample_count, 1, 128, 432), device=device, generator=generator, dtype=torch.float32)
-    latents = latents * sampler.init_noise_sigma
+    if latents is None:
+        latents = torch.randn((sample_count, 1, 128, 432), device=device, generator=generator, dtype=torch.float32)
+        latents = latents * sampler.init_noise_sigma
+
     sampler.set_timesteps(steps)
     timesteps = sampler.timesteps.to(device)
 
@@ -236,6 +246,8 @@ def inference(
         'eta': 0.0,
         'generator': generator
     }
+
+    intermediates = []
 
     for i, t in enumerate(tqdm(timesteps, desc="DDIM Sampling:", disable=not verbose)):
         model_input = latents
@@ -245,9 +257,20 @@ def inference(
         with torch.no_grad():
             noise_pred = model(model_input, timestep_tensor)[0] #type: ignore
 
+        if return_intermediate_steps:
+            intermediates.append(latents.detach().cpu().numpy())
+
         latents = sampler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample #type: ignore
 
-    return latents.detach().cpu().numpy() * 80.
+    out = {
+        "latents":  latents.detach().cpu().numpy() * 80.
+    }
+
+    if return_intermediate_steps:
+        intermediates = np.concatenate(intermediates, axis=1)
+        out["intermediates"] = intermediates * 80.
+
+    return out
 
 if __name__ == "__main__":
     prepare_dataset([
