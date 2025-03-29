@@ -12,6 +12,8 @@ from tqdm import tqdm, trange
 from dataclasses import asdict
 import wandb
 from dataclasses import dataclass
+from processing import SPECTROGRAM_SHAPE
+import argparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,23 +21,55 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class COMP5421Config():
-    batch_size: int = 4
-    num_epochs: int = 10
-    learning_rate: float = 1e-4
-    img_dims: tuple[int, int] = (128, 432)
-    dataset_src: str = "darinchau/comp5421-mel-spectrogram"
-    training_name: str = "comp5421-project"
-    val_size: float = 0.1
-    val_step: int = 1024  # Validate every n steps
-    val_samples: float = 256  # Validate over n samples instead of the whole val set
-    save_step: int = 2048
-    load_model_from: str | None = "darinchau/comp5421-project-devoted-firebrand-28-comp5421-mel-spectrogram-step-4096"
+    batch_size: int
+    num_epochs: int
+    learning_rate: float
+    img_dims: tuple[int, int]
+    dataset_src: str
+    training_name: str
+    val_size: float
+    val_step: int  # Validate every n steps
+    val_samples: float  # Validate over n samples instead of the whole val set
+    save_step: int
+    grad_accumulation_iters: int # Accumulate gradients over n iterations
+    load_model_from: str | None
 
 
 huggingface_hub.login(os.getenv("HF_TOKEN"))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def parse_config():
+    parser = argparse.ArgumentParser(description="Training configuration")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs to train")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate for the optimizer")
+    parser.add_argument("--img_dims", type=tuple, default=SPECTROGRAM_SHAPE, help="Image dimensions")
+    parser.add_argument("--dataset_src", type=str, default="darinchau/comp5421-mel-spectrogram-fma_small-128x216", help="Dataset source")
+    parser.add_argument("--training_name", type=str, default="comp5421-project", help="Training name for logging")
+    parser.add_argument("--val_size", type=float, default=0.1, help="Validation set size")
+    parser.add_argument("--val_step", type=int, default=1024, help="Validation step frequency")
+    parser.add_argument("--val_samples", type=float, default=256, help="Validation samples size")
+    parser.add_argument("--save_step", type=int, default=2048, help="Model save step frequency")
+    parser.add_argument("--grad_accumulation_iters", type=int, default=10, help="Gradient accumulation iterations")
+    parser.add_argument("--load_model_from", type=str, default=None, help="Path to load model from")
+
+    args = parser.parse_args()
+    config = COMP5421Config(
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        learning_rate=args.learning_rate,
+        img_dims=args.img_dims,
+        dataset_src=args.dataset_src,
+        training_name=args.training_name,
+        val_size=args.val_size,
+        val_step=args.val_step,
+        val_samples=args.val_samples,
+        save_step=args.save_step,
+        grad_accumulation_iters=args.grad_accumulation_iters,
+        load_model_from=args.load_model_from
+    )
+    return config
 
 def validate(config, model, loader, noise_scheduler, loss_func):
     val_loss = 0.0
@@ -54,7 +88,8 @@ def validate(config, model, loader, noise_scheduler, loss_func):
 
 
 def main():
-    config = COMP5421Config()
+    config = parse_config()
+    print(config)
     model = UNet2DModel(
         sample_size=config.img_dims,
         in_channels=1,
@@ -78,6 +113,8 @@ def main():
     # Load the dataset
     # If you need this dataset lmk - Darin
     dataset = load_dataset(config.dataset_src)
+
+    print(f"Number of samples: {len(dataset['train'])}")
 
     def collate_fn(batch):
         mels = [torch.tensor(item['mel']).unsqueeze(0) for item in batch]  # Adding channel dimension
@@ -121,7 +158,10 @@ def main():
             # Loss
             loss = loss_func(noise_pred, noise)
             loss.backward()
-            optimizer.step()
+
+            if ((step_count + 1) % config.grad_accumulation_iters == 0):
+                optimizer.step()
+                optimizer.zero_grad()
 
             if step_count > 0 and step_count % config.val_step == 0:
                 with torch.no_grad():
@@ -137,8 +177,12 @@ def main():
             epoch_loss += loss.item()
             wandb.log({"batch_loss": loss.item()}, step=step_count)
 
+        optimizer.step()
+        optimizer.zero_grad()
+
         average_epoch_loss = epoch_loss / len(train_loader)
         print(f'Epoch {epoch + 1} completed, Average Loss: {average_epoch_loss}')
+        model.push_to_hub(f"{config.training_name}-{wandb.run.name}-{config.dataset_src.split('/')[1]}-step-{step_count}")
         wandb.log({"epoch_loss": average_epoch_loss}, step=step_count)
 
     model.push_to_hub(f"{config.training_name}-{wandb.run.name}-{config.dataset_src.split('/')[1]}")
